@@ -11,17 +11,16 @@ mod terminal;
 mod test_bins;
 
 use crate::{
-    command::parse_commandline_args,
+    command::parse_cli_args_from_env,
     config_files::set_config_path,
     logger::{configure, logger},
 };
-use command::gather_commandline_args;
 use log::{Level, trace};
 use miette::Result;
 use nu_cli::gather_parent_env_vars;
 use nu_engine::{convert_env_values, exit::cleanup_exit};
 use nu_lsp::LanguageServer;
-use nu_path::{absolute_with, canonicalize_with};
+use nu_path::absolute_with;
 use nu_protocol::{
     ByteStream, Config, IntoValue, PipelineData, ShellError, Span, Spanned, Type, Value,
     engine::{EngineState, Stack},
@@ -69,16 +68,17 @@ fn main() -> Result<()> {
         miette_hook(x);
     }));
 
-    let mut engine_state = EngineState::new();
+    let engine_state = EngineState::new();
 
     // Parse commandline args very early and load experimental options to allow loading different
     // commands based on experimental options.
-    let (args_to_nushell, script_name, args_to_script) = gather_commandline_args();
-    let parsed_nu_cli_args = parse_commandline_args(&args_to_nushell.join(" "), &mut engine_state)
-        .unwrap_or_else(|err| {
-            report_shell_error(None, &engine_state, &err);
-            std::process::exit(1)
-        });
+    let parsed = parse_cli_args_from_env().unwrap_or_else(|err| {
+        report_shell_error(None, &engine_state, &err.into());
+        std::process::exit(1)
+    });
+    let parsed_nu_cli_args = parsed.nu;
+    let script_name = parsed.script_name;
+    let args_to_script = parsed.args_to_script;
 
     experimental_options::load(&engine_state, &parsed_nu_cli_args, !script_name.is_empty());
 
@@ -432,12 +432,13 @@ fn main() -> Result<()> {
 
         let mut working_set = StateWorkingSet::new(&engine_state);
         for plugin_filename in plugins {
-            // Make sure the plugin filenames are canonicalized
-            let filename = canonicalize_with(&plugin_filename.item, &init_cwd)
+            // Make sure the plugin filenames are absolute
+            let filename = absolute_with(&plugin_filename.item, &init_cwd)
                 .map_err(|err| {
-                    nu_protocol::shell_error::io::IoError::new(
+                    nu_protocol::shell_error::io::IoError::new_internal_with_path(
                         err,
-                        plugin_filename.span,
+                        "Could not resolve plugin path",
+                        nu_protocol::location!(),
                         PathBuf::from(&plugin_filename.item),
                     )
                 })
